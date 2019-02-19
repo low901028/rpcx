@@ -54,18 +54,18 @@ type service struct {
 
 // 判断提供的service内容是否是可导出的 外部使用的
 func isExported(name string) bool {
-	rune, _ := utf8.DecodeRuneInString(name)  // 获取name的第一个字符 及其对应utf-8编码后的编码字节数
+	rune, _ := utf8.DecodeRuneInString(name) // 获取name的第一个字符 及其对应utf-8编码后的编码字节数
 	return unicode.IsUpper(rune)
 }
 
 //
 func isExportedOrBuiltinType(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {  // 类型是否是指针   若是则需要使用Elem()来操作
+	for t.Kind() == reflect.Ptr { // 类型是否是指针   若是则需要使用Elem()来操作
 		t = t.Elem()
 	}
 	// PkgPath will be non-empty even for an exported type,
 	// so we need to check the type name as well.
-	return isExported(t.Name()) || t.PkgPath() == ""  // 检查t的name首字母以及PkgPath检查是否能导出或内嵌类型
+	return isExported(t.Name()) || t.PkgPath() == "" // 检查t的name首字母以及PkgPath检查是否能导出或内嵌类型
 }
 
 // Register publishes in the server the set of methods of the
@@ -87,14 +87,14 @@ func isExportedOrBuiltinType(t reflect.Type) bool {
 //   其中"Type.Method"中的Type是一个具体的receiver类型
 // Register方法完成两个操作：1、先在本地map 记录新增的service信息
 func (s *Server) Register(rcvr interface{}, metadata string) error {
-	sname, err := s.register(rcvr, "", false)  // 当未指定service的name同时useName标志=false 则使用rcvr类型的name
+	sname, err := s.register(rcvr, "", false) // 当未指定service的name同时useName标志=false 则使用rcvr类型的name
 	if err != nil {
 		return err
 	}
-	if s.Plugins == nil {  // plugin
+	if s.Plugins == nil { // plugin
 		s.Plugins = &pluginContainer{}
 	}
-	return s.Plugins.DoRegister(sname, rcvr, metadata)  // 回调plugin(使用其他的注册中心等)
+	return s.Plugins.DoRegister(sname, rcvr, metadata) // 回调plugin(使用其他的注册中心等)
 }
 
 // RegisterName is like Register but uses the provided name for the type
@@ -161,15 +161,16 @@ func (s *Server) register(rcvr interface{}, name string, useName bool) (string, 
 	service.typ = reflect.TypeOf(rcvr)
 	service.rcvr = reflect.ValueOf(rcvr)
 	sname := reflect.Indirect(service.rcvr).Type().Name() // Type
-	if useName {
+	// 检查选项
+	if useName { // 使用name
 		sname = name
 	}
-	if sname == "" {
+	if sname == "" { // service的name为空字符串
 		errorStr := "rpcx.Register: no service name for type " + service.typ.String()
 		log.Error(errorStr)
 		return sname, errors.New(errorStr)
 	}
-	if !useName && !isExported(sname) {
+	if !useName && !isExported(sname) { // 不使用name并且service name不能导出
 		errorStr := "rpcx.Register: type " + sname + " is not exported"
 		log.Error(errorStr)
 		return sname, errors.New(errorStr)
@@ -183,7 +184,6 @@ func (s *Server) register(rcvr interface{}, name string, useName bool) (string, 
 		var errorStr string
 
 		// To help the user, see if a pointer receiver would work.
-		// 当method的receiver是一个pointer
 		method := suitableMethods(reflect.PtrTo(service.typ), false)
 		if len(method) != 0 {
 			errorStr = "rpcx.Register: type " + sname + " has no exported methods of suitable type (hint: pass a pointer to value of that type)"
@@ -197,6 +197,7 @@ func (s *Server) register(rcvr interface{}, name string, useName bool) (string, 
 	return sname, nil
 }
 
+// 注册function非method
 func (s *Server) registerFunction(servicePath string, fn interface{}, name string, useName bool) (string, error) {
 	s.serviceMapMu.Lock()
 	defer s.serviceMapMu.Unlock()
@@ -208,7 +209,7 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 	if ss == nil {
 		ss = new(service)
 		ss.name = servicePath
-		ss.function = make(map[string]*functionType)
+		ss.function = make(map[string]*functionType) // 存放service所有的function
 	}
 
 	f, ok := fn.(reflect.Value)
@@ -219,7 +220,7 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 		return "", errors.New("function must be func or bound method")
 	}
 
-	fname := runtime.FuncForPC(reflect.Indirect(f).Pointer()).Name()
+	fname := runtime.FuncForPC(reflect.Indirect(f).Pointer()).Name() // function对应的name
 	if fname != "" {
 		i := strings.LastIndex(fname, ".")
 		if i >= 0 {
@@ -235,13 +236,15 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 		return fname, errors.New(errorStr)
 	}
 
-	t := f.Type()
-	if t.NumIn() != 3 {
+	t := f.Type()       // function类型
+	if t.NumIn() != 3 { // 输入参数共3个:context.Context/*args/*reply
 		return fname, fmt.Errorf("rpcx.registerFunction: has wrong number of ins: %s", f.Type().String())
 	}
-	if t.NumOut() != 1 {
+	if t.NumOut() != 1 { // 输出参数共一个: error
 		return fname, fmt.Errorf("rpcx.registerFunction: has wrong number of outs: %s", f.Type().String())
 	}
+
+	// 检查function的输入参数和输出参数
 
 	// First arg must be context.Context
 	ctxType := t.In(0)
@@ -249,12 +252,12 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 		return fname, fmt.Errorf("function %s must use context as  the first parameter", f.Type().String())
 	}
 
-	argType := t.In(1)
+	argType := t.In(1) // 属于可导出类型或内置类型
 	if !isExportedOrBuiltinType(argType) {
 		return fname, fmt.Errorf("function %s parameter type not exported: %v", f.Type().String(), argType)
 	}
 
-	replyType := t.In(2)
+	replyType := t.In(2) // 必须是pointer 并且也是可导出类型
 	if replyType.Kind() != reflect.Ptr {
 		return fname, fmt.Errorf("function %s reply type not a pointer: %s", f.Type().String(), replyType)
 	}
@@ -262,11 +265,13 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 		return fname, fmt.Errorf("function %s reply type not exported: %v", f.Type().String(), replyType)
 	}
 
+	// 返回类型必须是一个error
 	// The return type of the method must be error.
 	if returnType := t.Out(0); returnType != typeOfError {
 		return fname, fmt.Errorf("function %s returns %s, not error", f.Type().String(), returnType.String())
 	}
 
+	// 构成function：function、args、reply
 	// Install the methods
 	ss.function[fname] = &functionType{fn: f, ArgType: argType, ReplyType: replyType}
 	s.serviceMap[servicePath] = ss
@@ -281,14 +286,17 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 // 获取注册service类型对应的方法：必须是可导出的方法
 func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
 	methods := make(map[string]*methodType)
-	for m := 0; m < typ.NumMethod(); m++ {  // 遍历typ中包含的method
+	for m := 0; m < typ.NumMethod(); m++ { // 遍历typ中包含的method
 		method := typ.Method(m)
 		mtype := method.Type
 		mname := method.Name
 		// Method must be exported.
-		if method.PkgPath != "" {  // service中需要注册到本地方法必须是可导出的
+		if method.PkgPath != "" { // service中需要注册到本地方法必须是可导出的
 			continue
 		}
+
+		// method参数检查:输入参数、输出参数
+
 		// Method needs four ins: receiver, context.Context, *args, *reply.
 		if mtype.NumIn() != 4 { // 确保service提供的方法包括：receiver以及形参有context.Context, *args, *reply构成
 			if reportErr {
@@ -395,7 +403,7 @@ func (s *service) call(ctx context.Context, mtype *methodType, argv, replyv refl
 	// The return value for the method is an error.
 	// 判断返回值类型是否error
 	errInter := returnValues[0].Interface()
-	if errInter != nil {  // 执行service调用出现了error
+	if errInter != nil { // 执行service调用出现了error
 		return errInter.(error)
 	}
 
