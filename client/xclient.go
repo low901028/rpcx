@@ -136,23 +136,26 @@ func NewBidirectionalXClient(servicePath string, failMode FailMode, selectMode S
 		serverMessageChan: serverMessageChan,
 	}
 
+	// 记录注册中心的服务 用作本地缓存
+	// 也会根据client指定的group来进行service过滤（按需缓存本地记录）
+	//
 	servers := make(map[string]string)
 	pairs := discovery.GetServices()
 	for _, p := range pairs {
 		servers[p.Key] = p.Value
 	}
-	filterByStateAndGroup(client.option.Group, servers)
+	filterByStateAndGroup(client.option.Group, servers) // 指定group来过滤记录
 	client.servers = servers
-	if selectMode != Closest && selectMode != SelectByUser {
+	if selectMode != Closest && selectMode != SelectByUser { // 路由默认中：就近规则、用户自定义需要单独处理
 		client.selector = newSelector(selectMode, servers)
 	}
 
 	client.Plugins = &pluginContainer{}
 
-	ch := client.discovery.WatchService()
+	ch := client.discovery.WatchService() // 监听service的channel
 	if ch != nil {
 		client.ch = ch
-		go client.watch(ch)
+		go client.watch(ch) // 监听注册中心service变更 并同步本地缓存
 	}
 
 	return client
@@ -236,31 +239,32 @@ func (c *xClient) selectClient(ctx context.Context, servicePath, serviceMethod s
 	return k, client, err
 }
 
+// 获取本地缓存RPCClient 增加了锁机制
 func (c *xClient) getCachedClient(k string) (RPCClient, error) {
 	c.mu.RLock()
-	breaker, ok := c.breakers.Load(k) // 断路器
-	if ok && !breaker.(Breaker).Ready() {
+	breaker, ok := c.breakers.Load(k)     // 断路器
+	if ok && !breaker.(Breaker).Ready() { // 开启断路器的RPCCclient已处于负载状态下 没必要再来处理其他请求
 		c.mu.RUnlock()
 		return nil, ErrBreakerOpen
 	}
 
 	client := c.cachedClient[k]
-	if client != nil {
+	if client != nil { // 从本地缓存获取RPCClient
 		if !client.IsClosing() && !client.IsShutdown() {
 			c.mu.RUnlock()
 			return client, nil
 		}
-		delete(c.cachedClient, k)
-		client.Close()
+		delete(c.cachedClient, k) // 不健康的RPCClient需要从本地缓存剔除
+		client.Close()            //
 	}
 	c.mu.RUnlock()
 
 	//double check
 	c.mu.Lock()
 	client = c.cachedClient[k]
-	if client == nil || client.IsShutdown() {
+	if client == nil || client.IsShutdown() { // 本地缓存不在RPCClient 则需要根据service中的信息 重新与server建立连接
 		network, addr := splitNetworkAndAddress(k)
-		if network == "inprocess" {
+		if network == "inprocess" { // 进程内忽略(用户测试)
 			client = InprocessClient
 		} else {
 			client = &Client{
@@ -269,7 +273,7 @@ func (c *xClient) getCachedClient(k string) (RPCClient, error) {
 			}
 
 			var breaker interface{}
-			if c.option.GenBreaker != nil {
+			if c.option.GenBreaker != nil { // 断路器
 				breaker, _ = c.breakers.LoadOrStore(k, c.option.GenBreaker())
 			}
 			err := client.Connect(network, addr)
@@ -295,39 +299,41 @@ func (c *xClient) getCachedClient(k string) (RPCClient, error) {
 	return client, nil
 }
 
+// 获取本地缓存中service对应的RPCCclient
 func (c *xClient) getCachedClientWithoutLock(k string) (RPCClient, error) {
-	client := c.cachedClient[k]
+	client := c.cachedClient[k] // 直接本地缓存获取
 	if client != nil {
-		if !client.IsClosing() && !client.IsShutdown() {
+		if !client.IsClosing() && !client.IsShutdown() { // 本地存在RPCClient是否正常(没关闭、没shutdown)
 			return client, nil
 		}
 	}
 
 	//double check
-	client = c.cachedClient[k]
-	if client == nil {
-		network, addr := splitNetworkAndAddress(k)
-		if network == "inprocess" {
+	client = c.cachedClient[k] // 由于该方法中获取本地缓存RPCClient未进行加锁 需要通过双层检查缓存是否存在RPCCclient
+	if client == nil {         // 本地缓存不存在
+		network, addr := splitNetworkAndAddress(k) // 提取注册的service中网络部分：Network和地址
+		if network == "inprocess" {                // 进程内方式 需要特殊处理(主要为了测试进程内client的)
 			client = InprocessClient
-		} else {
-			client = &Client{
+		} else { // 生成环境常用方式
+			client = &Client{ //
 				option:  c.option,
 				Plugins: c.Plugins,
 			}
-			err := client.Connect(network, addr)
+			err := client.Connect(network, addr) // 连接server
 			if err != nil {
 				return nil, err
 			}
 		}
 
-		client.RegisterServerMessageChan(c.serverMessageChan)
+		client.RegisterServerMessageChan(c.serverMessageChan) // 注册到server信息通道 便于处理server通知
 
-		c.cachedClient[k] = client
+		c.cachedClient[k] = client // 本地缓存新增client记录
 	}
 
 	return client, nil
 }
 
+// 移除本地缓存中RPCClient记录：使用锁机制保障数据安全
 func (c *xClient) removeClient(k string, client RPCClient) {
 	c.mu.Lock()
 	cl := c.cachedClient[k]
@@ -337,11 +343,12 @@ func (c *xClient) removeClient(k string, client RPCClient) {
 	c.mu.Unlock()
 
 	if client != nil {
-		client.UnregisterServerMessageChan()
+		client.UnregisterServerMessageChan() // 取消server信息通道接收
 		client.Close()
 	}
 }
 
+// 提取注册在注册中心的service里面的network 、address部分用于来完成RPCClient与server端的连接
 func splitNetworkAndAddress(server string) (string, string) {
 	ss := strings.SplitN(server, "@", 2)
 	if len(ss) == 1 {
@@ -361,11 +368,11 @@ func splitNetworkAndAddress(server string) (string, string) {
 // 需要注意：若是对应的done通道不存在时 会创建一个新的，必须指定缓冲通道否则会导致crash
 // 还有一点由于该方式时异步方式，对应的FailMode不能使用
 func (c *xClient) Go(ctx context.Context, serviceMethod string, args interface{}, reply interface{}, done chan *Call) (*Call, error) {
-	if c.isShutdown {
+	if c.isShutdown { // client可用
 		return nil, ErrXClientShutdown
 	}
 
-	if c.auth != "" {
+	if c.auth != "" { // 需要鉴权 验证：通过context.Context来传递内容到server进行验证以metadata
 		metadata := ctx.Value(share.ReqMetaDataKey)
 		if metadata == nil {
 			return nil, errors.New("must set ReqMetaDataKey in context")
@@ -374,10 +381,11 @@ func (c *xClient) Go(ctx context.Context, serviceMethod string, args interface{}
 		m[share.AuthKey] = c.auth
 	}
 
-	_, client, err := c.selectClient(ctx, c.servicePath, serviceMethod, args)
+	_, client, err := c.selectClient(ctx, c.servicePath, serviceMethod, args) // 结合指定路由模式 指定client调用服务的选择方式
 	if err != nil {
 		return nil, err
 	}
+	// 调用Client来完成异步调用
 	return client.Go(ctx, c.servicePath, serviceMethod, args, reply, done), nil
 }
 
@@ -387,11 +395,11 @@ func (c *xClient) Go(ctx context.Context, serviceMethod string, args interface{}
 // 同步调用：发送请求等到结果直至timeout，最终会返回error状态；
 // 该方法基于FailMode来处理错误的：FailMode提供了多种取决用户选择的，执行完FailMode之后才会给出最终的error
 func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
-	if c.isShutdown {
+	if c.isShutdown { // client可用
 		return ErrXClientShutdown
 	}
 
-	if c.auth != "" {
+	if c.auth != "" { // 验证身份
 		metadata := ctx.Value(share.ReqMetaDataKey)
 		if metadata == nil {
 			return errors.New("must set ReqMetaDataKey in context")
@@ -401,7 +409,7 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 	}
 
 	var err error
-	k, client, err := c.selectClient(ctx, c.servicePath, serviceMethod, args)
+	k, client, err := c.selectClient(ctx, c.servicePath, serviceMethod, args) // 指定路由规则 执行service调用
 	if err != nil {
 		if c.failMode == Failfast {
 			return err
@@ -409,14 +417,14 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 	}
 
 	var e error
-	switch c.failMode {
-	case Failtry:
+	switch c.failMode { // 失败模式：在同步调用过程中 可以根据指定失败模式来进行RPCClient调用server
+	case Failtry: // 重试
 		retries := c.option.Retries
-		for retries > 0 {
+		for retries > 0 { // 根据指定的次数 进行失败重试直至达到指定重试总次数
 			retries--
 
 			if client != nil {
-				err = c.wrapCall(ctx, client, serviceMethod, args, reply)
+				err = c.wrapCall(ctx, client, serviceMethod, args, reply) // 包装调用：使用失败模式的调用和普通调用存在差异，需要满足失败模式后 方认为完成调用
 				if err == nil {
 					return nil
 				}
@@ -424,7 +432,7 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 					return err
 				}
 			}
-
+			// 重试最终仍不可用的RPCClient需要剔除； 并用本地缓存中的记录来填充
 			c.removeClient(k, client)
 			client, e = c.getCachedClient(k)
 		}
@@ -432,13 +440,13 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 			err = e
 		}
 		return err
-	case Failover:
+	case Failover: // 故障转移： 在重试的基础上 不同的选项其他机器进行尝试 直至达到重试次数
 		retries := c.option.Retries
 		for retries > 0 {
 			retries--
 
 			if client != nil {
-				err = c.wrapCall(ctx, client, serviceMethod, args, reply)
+				err = c.wrapCall(ctx, client, serviceMethod, args, reply) // 调用
 				if err == nil {
 					return nil
 				}
@@ -449,6 +457,7 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 
 			c.removeClient(k, client)
 			//select another server
+			// 使用另外一个来重试
 			k, client, e = c.selectClient(ctx, c.servicePath, serviceMethod, args)
 		}
 
@@ -456,8 +465,8 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 			err = e
 		}
 		return err
-	case Failbackup:
-		ctx, cancelFn := context.WithCancel(ctx)
+	case Failbackup: // 失败备份：定义两组节点，当向其中一个节点发送请求失败时，则会向另外一个节点发送，只要两组节点其中一个返回结果即认为成功：异步模式调用
+		ctx, cancelFn := context.WithCancel(ctx) // 通过context.Context的cancel方法来控制调用关闭
 		defer cancelFn()
 		call1 := make(chan *Call, 10)
 		call2 := make(chan *Call, 10)
@@ -469,11 +478,12 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 			reply2 = reflect.New(reflect.ValueOf(reply).Elem().Type()).Interface()
 		}
 
-		_, err1 := c.Go(ctx, serviceMethod, args, reply1, call1)
+		// 执行第一组  从channel获取结果
+		_, err1 := c.Go(ctx, serviceMethod, args, reply1, call1) // 异步
 
 		t := time.NewTimer(c.option.BackupLatency)
 		select {
-		case <-ctx.Done(): //cancel by context
+		case <-ctx.Done(): //cancel by context 取消执行
 			err = ctx.Err()
 			return err
 		case call := <-call1:
@@ -485,6 +495,8 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 		case <-t.C:
 
 		}
+
+		// 在前面一组未成功的情况下 执行第二组
 		_, err2 := c.Go(ctx, serviceMethod, args, reply2, call2)
 		if err2 != nil {
 			if _, ok := err.(ServiceError); !ok {
@@ -510,8 +522,8 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 		}
 
 		return err
-	default: //Failfast
-		err = c.wrapCall(ctx, client, serviceMethod, args, reply)
+	default: //Failfast 快速失败
+		err = c.wrapCall(ctx, client, serviceMethod, args, reply) // 直接调用 失败了立即返回error；默认使用方式
 		if err != nil {
 			if _, ok := err.(ServiceError); !ok {
 				c.removeClient(k, client)
@@ -524,11 +536,11 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 
 // 直接发送protocol.Message给server
 func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]string, []byte, error) {
-	if c.isShutdown {
+	if c.isShutdown { // client可用
 		return nil, nil, ErrXClientShutdown
 	}
 
-	if c.auth != "" {
+	if c.auth != "" { // 验证
 		metadata := ctx.Value(share.ReqMetaDataKey)
 		if metadata == nil {
 			return nil, nil, errors.New("must set ReqMetaDataKey in context")
@@ -538,7 +550,7 @@ func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]
 	}
 
 	var err error
-	k, client, err := c.selectClient(ctx, r.ServicePath, r.ServiceMethod, r.Payload)
+	k, client, err := c.selectClient(ctx, r.ServicePath, r.ServiceMethod, r.Payload) // 根据路由调用
 
 	if err != nil {
 		if c.failMode == Failfast {
@@ -551,8 +563,8 @@ func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]
 	}
 
 	var e error
-	switch c.failMode {
-	case Failtry:
+	switch c.failMode { // 失败模式： 见Call方法里面的说明
+	case Failtry: // 失败重试
 		retries := c.option.Retries
 		for retries > 0 {
 			retries--
@@ -574,7 +586,7 @@ func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]
 			err = e
 		}
 		return nil, nil, err
-	case Failover:
+	case Failover: // 故障转移
 		retries := c.option.Retries
 		for retries > 0 {
 			retries--
@@ -598,7 +610,7 @@ func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]
 		}
 		return nil, nil, err
 
-	default: //Failfast
+	default: //Failfast 快速失败
 		m, payload, err := client.SendRaw(ctx, r)
 
 		if err != nil {
@@ -611,14 +623,14 @@ func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]
 	}
 }
 
-//
+// 包装调用：增加前置处理和后置处理
 func (c *xClient) wrapCall(ctx context.Context, client RPCClient, serviceMethod string, args interface{}, reply interface{}) error {
 	if client == nil {
 		return ErrServerUnavailable
 	}
-	c.Plugins.DoPreCall(ctx, c.servicePath, serviceMethod, args)
-	err := client.Call(ctx, c.servicePath, serviceMethod, args, reply)
-	c.Plugins.DoPostCall(ctx, c.servicePath, serviceMethod, args, reply, err)
+	c.Plugins.DoPreCall(ctx, c.servicePath, serviceMethod, args)              // 前置调用处理
+	err := client.Call(ctx, c.servicePath, serviceMethod, args, reply)        // 调用
+	c.Plugins.DoPostCall(ctx, c.servicePath, serviceMethod, args, reply, err) // 后置调用出路
 
 	return err
 }
@@ -708,8 +720,8 @@ func (c *xClient) Fork(ctx context.Context, serviceMethod string, args interface
 		return ErrXClientShutdown
 	}
 
-	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
+	if c.auth != "" { // client的auth存在metadata数据中 需要保证使用auth的前提下 对应的ReqMetaDataKey存在
+		metadata := ctx.Value(share.ReqMetaDataKey) //  通过context,Context来传递
 		if metadata == nil {
 			return errors.New("must set ReqMetaDataKey in context")
 		}
@@ -720,7 +732,7 @@ func (c *xClient) Fork(ctx context.Context, serviceMethod string, args interface
 	var clients = make(map[string]RPCClient)
 	c.mu.RLock()
 	for k := range c.servers {
-		client, err := c.getCachedClientWithoutLock(k)
+		client, err := c.getCachedClientWithoutLock(k) // 本地缓存的RPCClient
 		if err != nil {
 			continue
 		}
@@ -791,10 +803,10 @@ func (c *xClient) Close() error {
 
 	var errs []error
 	c.mu.Lock()
-	for k, v := range c.cachedClient {
+	for k, v := range c.cachedClient { // 清除本地service缓存记录
 		e := v.Close()
 		if e != nil {
-			errs = append(errs, e)
+			errs = append(errs, e) // 记录处理过程出现的error
 		}
 
 		delete(c.cachedClient, k)
@@ -802,7 +814,7 @@ func (c *xClient) Close() error {
 	}
 	c.mu.Unlock()
 
-	go func() {
+	go func() { // 本地删除的service需要关闭注册中的watch 否则会导致本地缓存被增加
 		defer func() {
 			if r := recover(); r != nil {
 
