@@ -526,6 +526,8 @@ func (client *Client) input() { //
 			break
 		}
 		// 验证Message的合法性
+		// 每次对server来完成service调用过程会被封装成Call
+		// Call对象里面包括：本次调用的service名称、对应的方法及其参数和返回值、本次操作的error等
 		seq := res.Seq()
 		var call *Call
 		isServerMessage := (res.MessageType() == protocol.Request && !res.IsHeartbeat() && res.IsOneway()) // 是否为server消息

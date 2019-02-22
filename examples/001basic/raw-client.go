@@ -18,14 +18,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"rpcx/examples/models"
-	"log"
 	"github.com/smallnest/rpcx/client"
 	"github.com/smallnest/rpcx/protocol"
+	"log"
+	"rpcx/examples/models"
 )
 
 var (
-	addr = flag.String("addr", "localhost:8972","server address")
+	addr = flag.String("addr", "localhost:8972", "server address")
 )
 
 func main() {
@@ -42,7 +42,7 @@ func main() {
 
 	reply := &models.Reply{}
 
-	payload,_ := json.Marshal(args)
+	payload, _ := json.Marshal(args)
 	// 构建message
 	req := protocol.NewMessage()
 	req.SetVersion(1)
@@ -57,16 +57,20 @@ func main() {
 	m := make(map[string]string)
 	req.ServicePath = "Arith"
 	req.ServiceMethod = "Mul"
-	m["__ID"] = "6ba7b810-9dad-11d1-80b4-00c04fd430c9"
+	//m["__ID"] = "6ba7b810-9dad-11d1-80b4-00c04fd430c9"
 	req.Metadata = m
 	req.Payload = payload
 
-	_, bytes, err := c.SendRaw(context.Background(),req)
-	if err != nil{
+	rdatas, _ := json.Marshal(req)
+	sdatas := string(rdatas)
+	fmt.Println(sdatas)
+
+	_, bytes, err := c.SendRaw(context.Background(), req)
+	if err != nil {
 		log.Fatalf("failed to call: %v", err)
 	}
 
-	json.Unmarshal(bytes,reply)
+	json.Unmarshal(bytes, reply)
 	//
 	fmt.Println(reply.C)
 }

@@ -14,53 +14,19 @@
 package main
 
 import (
-	"context"
 	"flag"
-	"fmt"
 	"github.com/smallnest/rpcx/server"
-	"net"
 	"rpcx/examples/models"
-	"time"
 )
 
 var (
 	addr = flag.String("addr", "localhost:8972", "server address")
 )
 
-var clientConn net.Conn
-var connected = false
-
-type ArithD int
-
-func (a *ArithD) Mul(ctx context.Context, args *models.Args, reply *models.Reply) error {
-	clientConn = ctx.Value(server.RemoteConnContextKey).(net.Conn)
-	reply.C = args.A * args.B
-	connected = true
-
-	return nil
-}
-
 func main() {
 	flag.Parse()
 
 	s := server.NewServer()
-	s.Register(new(ArithD), "")
 	s.Register(new(models.Arith), "")
-	//go s.Serve("tcp", *addr)
-	go s.Serve("http", *addr)
-
-	for !connected {
-		time.Sleep(time.Second)
-	}
-
-	for {
-		if clientConn != nil {
-			err := s.SendMessage(clientConn, "test_service_path", "test_service_method", nil, []byte("hello world."))
-			if err != nil {
-				fmt.Printf("failed to send message to %s: %v\n", clientConn.RemoteAddr().String(), err)
-				clientConn = nil
-			}
-		}
-		time.Sleep(time.Second)
-	}
+	s.Serve("http", *addr)
 }

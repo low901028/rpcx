@@ -20,21 +20,17 @@ import (
 	"fmt"
 	"github.com/smallnest/rpcx/client"
 	"github.com/smallnest/rpcx/protocol"
-	"rpcx/examples/models"
 	"log"
+	"rpcx/examples/models"
 )
 
 var (
-	addr = flag.String("addr","localhost:8972","server address")
+	addr = flag.String("addr", "localhost:8972", "server address")
 )
 
 func main() {
 	flag.Parse()
 
-	//
-	d := client.NewPeer2PeerDiscovery("tcp@"+*addr, "")
-	xclient := client.NewXClient("Arith", client.Failtry, client.RandomSelect, d, client.DefaultOption)
-	defer xclient.Close()
 	//
 	args := &models.Args{
 		A: 10,
@@ -43,7 +39,13 @@ func main() {
 
 	reply := &models.Reply{}
 
-	payload,_ := json.Marshal(args)
+	payload, _ := json.Marshal(args)
+
+	//
+	d := client.NewPeer2PeerDiscovery("tcp@"+*addr, "")
+	xclient := client.NewXClient("Arith", client.Failtry, client.RandomSelect, d, client.DefaultOption)
+	defer xclient.Close()
+
 	// 构建message
 	req := protocol.NewMessage()
 	req.SetVersion(1)
@@ -63,11 +65,11 @@ func main() {
 	req.Payload = payload
 
 	_, bytes, err := xclient.SendRaw(context.Background(), req)
-	if err != nil{
+	if err != nil {
 		log.Fatalf("failed to call: %v", err)
 	}
 
-	json.Unmarshal(bytes,reply)
+	json.Unmarshal(bytes, reply)
 	//
 	fmt.Println(reply.C)
 }

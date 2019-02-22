@@ -14,13 +14,19 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"flag"
-	"github.com/smallnest/rpcx/client"
+	"github.com/rpcx-ecosystem/rpcx-gateway"
 	"github.com/smallnest/rpcx/codec"
-	"github.com/smallnest/rpcx/protocol"
+	"io"
+	"io/ioutil"
+	_ "io/ioutil"
 	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
 	"rpcx/examples/models"
+	"rpcx/protocol"
 )
 
 var (
@@ -28,24 +34,21 @@ var (
 )
 
 func main() {
-	flag.Parse()
-	//
-	dis := client.NewPeer2PeerDiscovery("tcp@"+*addr, "")
-	xclient := client.NewXClient("Arith", client.Failtry, client.RandomSelect, dis, client.DefaultOption)
-	defer xclient.Close()
-
-	args := &models.Args{
+	cc := codec.JSONCodec{}
+	args := models.Args{
 		A: 100,
 		B: 200,
 	}
-
-	cc := codec.MsgpackCodec{}
 	data, err := cc.Encode(args)
 	if err != nil {
 		log.Fatalf("failed to encode: ", err)
 	}
+	req, err := http.NewRequest("CONNECT", "http://localhost:8972/_rpcx_", bytes.NewReader(data))
+	if err != nil {
+		log.Fatalf("failed to new request: ", err)
+		return
+	}
 
-	reply := &models.Reply{}
 	// 构建message
 	message := protocol.NewMessage()
 	message.Payload = data
@@ -55,15 +58,28 @@ func main() {
 	h := message.Header
 	h.SetSeq(10000)
 	h.SetMessageType(0)
-	h.SetSerializeType(3)
-	log.Println(message)
-	//
-	metadata, datas, err := xclient.SendRaw(context.Background(), message)
+	h.SetSerializeType(1)
 
-	log.Printf("response meta data = %v\n", metadata)
-	err = cc.Decode(datas, reply)
+	dial, err := net.Dial("tcp", "localhost:8972")
+	clientconn := httputil.NewClientConn(dial, nil)
+	//defer clientconn.Close()
+
+	_, err = clientconn.Do(req)
+	//err = clientconn.Write(req)
+
 	if err != nil {
-		log.Fatalf("failed to decode: ", err)
+		log.Fatalf("failed to execute requst: ", err)
 	}
-	log.Printf("%d * %d = %d", args.A, args.B, reply.C)
+
+	hconn, _ := clientconn.Hijack()
+	//defer hconn.Close()
+	go io.Copy(hconn, bytes.NewReader(data))
+	datas, err := ioutil.ReadAll(hconn)
+
+	reply := &models.Reply{}
+	cc.Decode(datas, &reply)
+	log.Println("the response is ", string(datas))
+	// 结束
+
+	log.Printf("%d * %d = %d\n", args.A, args.B, reply.C)
 }
