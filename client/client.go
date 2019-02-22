@@ -506,7 +506,7 @@ func (client *Client) send(ctx context.Context, call *Call) { // 发送client请
 
 }
 
-// 读取server的响应结果：
+// 当connection处于connected时 可进行read和write操作
 // 1、本地缓存不存在对应调用对象call记录
 // 2、调用对象响应结果返回：a、出现了Error b、正常
 func (client *Client) input() { //
@@ -518,16 +518,18 @@ func (client *Client) input() { //
 			client.Conn.SetReadDeadline(time.Now().Add(client.option.ReadTimeout))
 		}
 
+		// 完成将用户定义的request转为Message
 		err = res.Decode(client.r) // 解码
 		//res, err = protocol.Read(client.r)
 
 		if err != nil {
 			break
 		}
+		// 验证Message的合法性
 		seq := res.Seq()
 		var call *Call
 		isServerMessage := (res.MessageType() == protocol.Request && !res.IsHeartbeat() && res.IsOneway()) // 是否为server消息
-		if !isServerMessage {
+		if !isServerMessage {                                                                              // 当前Message属于request的时  获取其关联的pending中对应call：pending中记录的是待执行的call
 			client.mutex.Lock()
 			call = client.pending[seq]
 			delete(client.pending, seq)
@@ -536,7 +538,7 @@ func (client *Client) input() { //
 
 		switch {
 		case call == nil: // 当调用对象call不存在本地缓存中
-			if isServerMessage {
+			if isServerMessage { //
 				if client.ServerMessageChan != nil {
 					go client.handleServerRequest(res) // 新建go协程单独处理response结果
 					res = protocol.NewMessage()
